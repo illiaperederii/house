@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>Test</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<link type="text/css" rel="stylesheet" href="main.css">
+	</head>
+	<body>
+		<div id="overlay">
+			<button id="startButton">Start Our Test</button>
+		</div>
+		<div id="container"></div>
+		<div id="info">
+		</div>
+		<video id="video" loop crossOrigin="anonymous" playsinline style="display:none">
+			<source src="textures/pano.webm" type='video/webm; codecs="theora, vorbis"'>
+			<source src="textures/pano.mp4" type='video/mp4; codecs="avc1.42E01E, mp4a.40.2"'>
+		</video>
+		<!-- Import maps polyfill -->
+		<!-- Remove this when import maps will be widely supported -->
+		<script type="x-shader/x-vertex" id="vertexShader">
+
+			varying vec3 vWorldPosition;
+
+			void main() {
+
+				vec4 worldPosition = modelMatrix * vec4( position, 1.0 );
+				vWorldPosition = worldPosition.xyz;
+
+				gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+
+			}
+
+		</script>
+
+		<script type="x-shader/x-fragment" id="fragmentShader">
+
+			uniform vec3 topColor;
+			uniform vec3 bottomColor;
+			uniform float offset;
+			uniform float exponent;
+
+			varying vec3 vWorldPosition;
+
+			void main() {
+
+				float h = normalize( vWorldPosition + offset ).y;
+				gl_FragColor = vec4( mix( bottomColor, topColor, max( pow( max( h , 0.0), exponent ), 0.0 ) ), 1.0 );
+
+			}
+
+		</script>
+		<script async src="https://unpkg.com/es-module-shims@1.3.6/dist/es-module-shims.js"></script>
+
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "../build/three.module.js"
+				}
+			}
+		</script>
+
+		<script type="module">
+
+			import * as THREE from 'three';
+
+			import Stats from './jsm/libs/stats.module.js';
+			import { GUI } from './jsm/libs/lil-gui.module.min.js';
+
+			import { OrbitControls } from './jsm/controls/OrbitControls.js';
+			import { GLTFLoader } from './jsm/loaders/GLTFLoader.js';
+			import { DRACOLoader } from './jsm/loaders/DRACOLoader.js';
+
+			import { EffectComposer } from './jsm/postprocessing/EffectComposer.js';
+			import { RenderPass } from './jsm/postprocessing/RenderPass.js';
+			import { ShaderPass } from './jsm/postprocessing/ShaderPass.js';
+			import { BloomPass } from './jsm/postprocessing/BloomPass.js';
+			import { CopyShader } from './jsm/shaders/CopyShader.js';
+			
+			import { RGBMLoader } from './jsm/loaders/RGBMLoader.js';
+			import { RGBELoader } from './jsm/loaders/RGBELoader.js';
+			import { HDRCubeTextureLoader } from './jsm/loaders/HDRCubeTextureLoader.js';
+			import { Sky } from './jsm/objects/Sky.js';
+			import { Lensflare, LensflareElement } from './jsm/objects/Lensflare.js';
+
+			let container, camera, scene, renderer, bulbLight, bulbMat, hemiLight, stats, video, texture, material, mesh;
+			let sun;
+			let composer;
+			let ballMat, cubeMat, floorMat;
+			let mixer;
+			let previousShadowMap = true;
+			let light1, light2;
+
+			// ref for lumens: http://www.power-sure.com/lumens.htm
+			const bulbLuminousPowers = {
+				"110000 lm (1000W)": 110000,
+				"3500 lm (300W)": 3500,
+				"1700 lm (100W)": 1700,
+				"800 lm (60W)": 800,
+				"400 lm (40W)": 400,
+				"180 lm (25W)": 180,
+				"20 lm (4W)": 20,
+				"Off": 0
+			};
+
+			// ref for solar irradiances: https://en.wikipedia.org/wiki/Lux
+			const hemiLuminousIrradiances = {
+				"0.0001 lx (Moonless Night)": 0.0001,
+				"0.002 lx (Night Airglow)": 0.002,
+				"0.5 lx (Full Moon)": 0.5,
+				"3.4 lx (City Twilight)": 3.4,
+				"50 lx (Living Room)": 50,
+				"100 lx (Very Overcast)": 100,
+				"350 lx (Office Room)": 350,
+				"400 lx (Sunrise/Sunset)": 400,
+				"1000 lx (Overcast)": 1000,
+				"18000 lx (Daylight)": 18000,
+				"50000 lx (Direct Sun)": 50000
+			};
+
+			const params = {
+				shadows: true,
+				exposure: 1,
+				bulbPower: Object.keys( bulbLuminousPowers )[ 1 ],
+				hemiIrradiance: Object.keys( hemiLuminousIrradiances )[ 3 ]
+			};
+			let parameters = {
+					elevation: 2,
+					azimuth: 180
+				};
+
+			const startButton = document.getElementById( 'startButton' );
+			startButton.addEventListener( 'click', function () {
+
+				init();
+				animate();
+
+			} );
+			
+
+			function init() {
+				const overlay = document.getElementById( 'overlay' );
+				overlay.remove();
+				container = document.getElementById( 'container' );
+
+				renderer = new THREE.WebGLRenderer();
+				renderer.physicallyCorrectLights = true;
+				renderer.outputEncoding = THREE.sRGBEncoding;
+				renderer.shadowMap.enabled = true;
+				//renderer.toneMapping = THREE.ReinhardToneMapping;
+				renderer.toneMapping = THREE.ACESFilmicToneMapping;
+				renderer.setPixelRatio( window.devicePixelRatio );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				container.appendChild( renderer.domElement );
+
+				stats = new Stats();
+				container.appendChild( stats.dom );
+
+				camera = new THREE.PerspectiveCamera( 50, window.innerWidth / window.innerHeight, 0.2, 100 );
+				camera.position.set( 4, 2, 6 );
+
+				scene = new THREE.Scene();
+				scene.background = new THREE.Color().setHSL( 0.6, 0, 1 );
+				scene.fog = new THREE.Fog( scene.background, 1, 5000 );
+				
+				const controls = new OrbitControls( camera, renderer.domElement );
+				controls.minDistance = 4;
+				controls.maxDistance = 16;
+
+				window.addEventListener( 'resize', onWindowResize );
+
+				//load light
+				loadLight();
+				loadGround();
+				loadBuilding();
+				loadGui();
+
+				renderer.autoClear = false;
+				// const renderModel = new RenderPass( scene, camera );
+				// const effectBloom = new BloomPass( 1.3 );
+				// const effectCopy = new ShaderPass( CopyShader );
+
+				// composer = new EffectComposer( renderer );
+
+				// composer.addPass( renderModel );
+				// composer.addPass( effectBloom );
+				// composer.addPass( effectCopy );
+			}
+			function loadLight(){
+				// Hemisphere LIGHTS
+				const hemiLight = new THREE.HemisphereLight( 0xffffff, 0xffffff, 0.6 );
+				hemiLight.color.setHSL( 0.6, 1, 0.6 );
+				hemiLight.groundColor.setHSL( 0.095, 1, 0.75 );
+				hemiLight.position.set( 0, 50, 0 );
+				scene.add( hemiLight );
+
+				const hemiLightHelper = new THREE.HemisphereLightHelper( hemiLight, 10 );
+				scene.add( hemiLightHelper );
+
+				//Direct Lights
+				const dirLight = new THREE.DirectionalLight( 0xffffff, 1 );
+				dirLight.color.setHSL( 0.1, 1, 0.95 );
+				dirLight.position.set( -0.5, 4, 1 );
+				dirLight.position.multiplyScalar( 30 );
+				scene.add( dirLight );
+
+				dirLight.castShadow = true;
+
+				dirLight.shadow.mapSize.width = 2048;
+				dirLight.shadow.mapSize.height = 2048;
+
+				const d = 50;
+
+				dirLight.shadow.camera.left = - d;
+				dirLight.shadow.camera.right = d;
+				dirLight.shadow.camera.top = d;
+				dirLight.shadow.camera.bottom = - d;
+
+				dirLight.shadow.camera.far = 3500;
+				dirLight.shadow.bias = - 0.0001;
+
+				const dirLightHelper = new THREE.DirectionalLightHelper( dirLight, 10 );
+				scene.add( dirLightHelper );
+
+				// Sun Light
+				sun = new THREE.Vector3();
+				const sky = new Sky();
+				sky.scale.setScalar( 10000 );
+				scene.add( sky );
+
+				const skyUniforms = sky.material.uniforms;
+				skyUniforms[ 'turbidity' ].value = 10;
+				skyUniforms[ 'rayleigh' ].value = 2;
+				skyUniforms[ 'mieCoefficient' ].value = 0.005;
+				skyUniforms[ 'mieDirectionalG' ].value = 0.8;
+				const pmremGenerator = new THREE.PMREMGenerator( renderer );
+				function updateSun() {
+					const phi = THREE.MathUtils.degToRad( 90 - parameters.elevation );
+					const theta = THREE.MathUtils.degToRad( parameters.azimuth );
+					sun.setFromSphericalCoords( 1, phi, theta );
+					sky.material.uniforms[ 'sunPosition' ].value.copy( sun );
+					scene.environment = pmremGenerator.fromScene( sky ).texture;
+				}
+				updateSun();
+
+				const bulbGeometry = new THREE.SphereGeometry( 0.02, 16, 8 );
+				bulbLight = new THREE.PointLight( 0xffee88, 1, 100, 2 );
+
+				bulbMat = new THREE.MeshStandardMaterial( {
+					emissive: 0xffffee,
+					emissiveIntensity: 1,
+					color: 0x000000
+				} );
+				bulbLight.add( new THREE.Mesh( bulbGeometry, bulbMat ) );
+				bulbLight.position.set( 0, 4, 0 );
+				bulbLight.castShadow = true;
+				scene.add( bulbLight );				
+			}
+			
+			function loadGround(){
+				//  GROUND
+				const gt = new THREE.TextureLoader().load( 'textures/terrain/grasslight-big.jpg' );
+				const gg = new THREE.PlaneGeometry( 1600, 1600 );
+				const gm = new THREE.MeshPhongMaterial( { color: 0xffffff, map: gt } );
+				const ground = new THREE.Mesh( gg, gm );
+				ground.rotation.x = - Math.PI / 2;
+				ground.material.map.repeat.set( 640, 640 );
+				ground.material.map.wrapS = THREE.RepeatWrapping;
+				ground.material.map.wrapT = THREE.RepeatWrapping;
+				ground.material.map.encoding = THREE.sRGBEncoding;
+				// note that because the ground does not cast a shadow, .castShadow is left false
+				ground.receiveShadow = true;
+				scene.add( ground );
+			}
+
+			function loadBuilding(){
+				const dracoLoader = new DRACOLoader();
+				dracoLoader.setDecoderPath( 'js/libs/draco/gltf/' );
+				const loader = new GLTFLoader();
+				loader.setDRACOLoader( dracoLoader );
+				loader.load( 'models/gltf/interview.glb', function ( gltf ) {
+
+					const model = gltf.scene;
+					model.position.set( 0, 0.1, 0 );
+					model.scale.set( 0.4,  0.4,  0.4 );
+					//model.castShadow = true;
+					model.receiveShadow = true;
+					scene.add( model );
+
+					//mixer = new THREE.AnimationMixer( model );
+					//mixer.clipAction( gltf.animations[ 0 ] ).play();
+
+					animate();
+
+				}, undefined, function ( e ) {
+
+					console.error( e );
+
+				} );
+				video = document.getElementById( 'video' );
+				video.play();
+				video.addEventListener( 'play', function () {
+					this.currentTime = 3;
+				} );
+				texture = new THREE.VideoTexture( video );
+				parameters = { color: 0xffffff, map: texture };
+
+				const boxGeometry = new THREE.BoxGeometry( 0.1, 2.6, 1.8 );
+
+				material = new THREE.MeshLambertMaterial( parameters );
+				material.hue = 1;
+				material.saturation = 0;
+				material.color.setHSL( material.hue, material.saturation, 0.5 );
+				const boxMesh = new THREE.Mesh( boxGeometry, material );
+				boxMesh.position.set( -8.9, 2.28, -4.8 );
+				boxMesh.castShadow = true;
+				scene.add( boxMesh );
+				
+				const geometry1 = new THREE.BoxGeometry( 0.1, 2.6, 1.8 );
+				const texture1 = new THREE.TextureLoader().load( "textures/pic1.jpg" );
+				const material1 = new THREE.MeshBasicMaterial( { map: texture1 } );
+				const plane = new THREE.Mesh( geometry1, material1 );
+				plane.position.set( -8.9, 2.28, 4.56 );
+				scene.add( plane );
+
+				const geometry2 = new THREE.BoxGeometry( 1.6, 2.3, 0.1 );
+				const texture2 = new THREE.TextureLoader().load( "textures/pic1.jpg" );
+				const material2 = new THREE.MeshBasicMaterial( { map: texture1 } );
+				const plane2 = new THREE.Mesh( geometry2, material2 );
+				plane2.castShadow = true;
+				plane2.receiveShadow = true;
+				plane2.position.set( -1.3, 2.5, -8.8 );
+				scene.add( plane2 );
+
+				const plane3 = new THREE.Mesh( geometry2, material2 );
+				plane3.castShadow = true;
+				plane3.receiveShadow = true;
+				plane3.position.set( 1.3, 2.5, -8.8 );
+				scene.add( plane3 );
+				//lights
+				const sphere = new THREE.SphereGeometry( 0, 0.1, 0.1 );
+				light1 = new THREE.PointLight( 0xff0040, 2, 50, 1.5 );
+				light1.position.x = 1.3;
+				light1.position.y = 2.6;
+				light1.position.z = -8.8;
+				
+				light1.add( new THREE.Mesh( sphere, new THREE.MeshBasicMaterial( { color: 0xff0040 } ) ) );
+				scene.add( light1 );
+				light1.target = plane3;
+				scene.add(light1.target);
+				
+
+				const textureLoader = new THREE.TextureLoader();
+				ballMat = new THREE.MeshStandardMaterial( {
+					color: 0xffffff,
+					roughness: 0.5,
+					metalness: 1.0
+				} );
+				textureLoader.load( "textures/planets/earth_atmos_2048.jpg", function ( map ) {
+
+					map.anisotropy = 4;
+					map.encoding = THREE.sRGBEncoding;
+					ballMat.map = map;
+					ballMat.needsUpdate = true;
+
+				} );
+				textureLoader.load( "textures/planets/earth_specular_2048.jpg", function ( map ) {
+
+					map.anisotropy = 4;
+					map.encoding = THREE.sRGBEncoding;
+					ballMat.metalnessMap = map;
+					ballMat.needsUpdate = true;
+
+				} );
+				const ballGeometry = new THREE.SphereGeometry( 1, 32, 32 );
+				const ballMesh = new THREE.Mesh( ballGeometry, ballMat );
+				ballMesh.position.set( -12, 3, 1 );
+				ballMesh.rotation.y = Math.PI;
+				ballMesh.castShadow = true;
+				scene.add( ballMesh );
+				
+				// lensflares
+				
+				const textureFlare0 = textureLoader.load( 'textures/lensflare/lensflare0.png' );
+				const textureFlare3 = textureLoader.load( 'textures/lensflare/lensflare3.png' );
+
+				addLight( 0.55, 0.9, 0.5, -1.3, 3, -8 );
+				addLight( 0.08, 0.8, 0.5, 0, 2, -7.8 );
+				addLight( 0.995, 0.5, 0.9, 1.3, 3.3, -7 );
+
+				function addLight( h, s, l, x, y, z ) {
+
+					const light = new THREE.PointLight( 0xffffff, 1.5, 2000 );
+					light.color.setHSL( h, s, l );
+					light.position.set( x, y, z );
+					scene.add( light );
+
+					const lensflare = new Lensflare();
+					lensflare.addElement( new LensflareElement( textureFlare0, 180, 0, light.color ) );
+					lensflare.addElement( new LensflareElement( textureFlare3, 260, 0.6 ) );
+					lensflare.addElement( new LensflareElement( textureFlare3, 283, 0.7 ) );
+					lensflare.addElement( new LensflareElement( textureFlare3, 252, 0.9 ) );
+					lensflare.addElement( new LensflareElement( textureFlare3, 237, 1 ) );
+					light.add( lensflare );
+
+				}
+				
+			}
+			class ColorGUIHelper {
+				constructor(object, prop) {
+				this.object = object;
+				this.prop = prop;
+				}
+				get value() {
+				return `#${this.object[this.prop].getHexString()}`;
+				}
+				set value(hexString) {
+				this.object[this.prop].set(hexString);
+				}
+			}
+
+			function makeXYZGUI(gui, vector3, name, onChangeFn) {
+				const folder = gui.addFolder(name);
+				folder.add(vector3, 'x', -10, 10).onChange(onChangeFn);
+				folder.add(vector3, 'y', 0, 10).onChange(onChangeFn);
+				folder.add(vector3, 'z', -10, 10).onChange(onChangeFn);
+				folder.open();
+			}
+			function loadGui() {
+				const gui = new GUI();
+
+				gui.add( params, 'hemiIrradiance', Object.keys( hemiLuminousIrradiances ) );
+				gui.add( params, 'bulbPower', Object.keys( bulbLuminousPowers ) );
+				gui.add( params, 'exposure', 0, 1 );
+				gui.add( params, 'shadows' );
+
+				const color = 0x0000FF;
+				const intensity = 1;
+				const light = new THREE.DirectionalLight(color, intensity);
+				light.position.set(0, 3, 0);
+				light.target.position.set(-5, 5, 5);
+				scene.add(light);
+				scene.add(light.target);
+
+				const helper = new THREE.DirectionalLightHelper(light);
+				scene.add(helper);
+				function updateLight() {
+				light.target.updateMatrixWorld();
+				helper.update();
+				}
+				updateLight();
+				gui.addColor(new ColorGUIHelper(light, 'color'), 'value').name('color');
+				gui.add(light, 'intensity', 0, 2, 0.01);
+
+				makeXYZGUI(gui, light.position, 'position', updateLight);
+				makeXYZGUI(gui, light.target.position, 'target', updateLight);
+
+				gui.open();
+
+				
+			}
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+			}
+
+			//
+
+			function animate() {
+
+				requestAnimationFrame( animate );
+
+				render();
+
+			}
+
+			function render() {
+
+				renderer.toneMappingExposure = Math.pow( params.exposure, 5.0 ); // to allow for very bright scenes.
+				renderer.shadowMap.enabled = params.shadows;
+				bulbLight.castShadow = params.shadows;
+
+				if ( params.shadows !== previousShadowMap ) {
+
+					previousShadowMap = params.shadows;
+
+				}
+
+				bulbLight.power = bulbLuminousPowers[ params.bulbPower ];
+				bulbMat.emissiveIntensity = bulbLight.intensity / Math.pow( 0.02, 2.0 ); // convert from intensity to irradiance at bulb surface
+
+				//hemiLight.intensity = hemiLuminousIrradiances[ params.hemiIrradiance ];
+				const time = Date.now() * 0.0005;
+
+				//bulbLight.position.y = Math.cos( time ) * 0.75 + 1.25;
+
+				renderer.render( scene, camera );
+
+				stats.update();
+			}
+
+		</script>
+	</body>
+</html>
